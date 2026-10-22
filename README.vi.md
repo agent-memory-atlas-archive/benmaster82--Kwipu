@@ -39,6 +39,42 @@ Kwipu biến một thư mục tài liệu thành chỉ mục RAG đồ thị thu
 - Hỗ trợ các mẫu tiếng Anh, tiếng Ý, tiếng Pháp, tiếng Đức, tiếng Tây Ban Nha và tiếng Bồ Đào Nha.
 - Cung cấp cùng một nguồn tri thức qua terminal, API web và MCP.
 
+### Từ ghi chú đến đồ thị
+
+Lấy ví dụ `knowledge_base/examples/Alice.md`:
+
+```markdown
+---
+tags: [person, team]
+role: Frontend Lead
+project: Project Alpha
+---
+# Alice
+
+Frontend Lead on [[Project Alpha]].
+- Collaborates with [[Bob]] on API integration
+```
+
+Kwipu đọc frontmatter và các wikilink thành quan hệ cấu trúc, đồng thời nhờ LLM trích xuất quan hệ ngữ nghĩa từ nội dung văn bản:
+
+```mermaid
+flowchart LR
+    alice(("Alice<br/>ghi chú Alice.md"))
+    chunk["📄 đoạn văn bản của Alice.md"]
+
+    alice -- "Has role<br/>(frontmatter · role · dòng 3)" --> fl["Frontend Lead"]
+    alice -- "Participates in<br/>(frontmatter · project · dòng 4)" --> pa(("Project Alpha"))
+    alice -- "Has tag<br/>(frontmatter · tags · dòng 2)" --> tag["person · team"]
+    alice -- "Collaborates with<br/>(wikilink · dòng 13)" --> bob(("Bob"))
+    alice -- "Is related to<br/>(wikilink · dòng 9)" --> pa
+    alice == "Specializes in<br/>(LLM, minh họa)" ==> react["React"]
+    chunk -. "nguồn" .-> react
+```
+
+- **Quan hệ cấu trúc** đến từ các khóa frontmatter và từ những từ đứng trước mỗi `[[wikilink]]` (ở đây là *collaborates with*). Khi không có mẫu nào khớp, quan hệ sẽ dùng giá trị dự phòng *Is related to* theo ngôn ngữ của dòng đó. Mỗi quan hệ ghi lại nguồn gốc của nó: loại nguồn, tệp, trường frontmatter, số dòng và mã băm nội dung của ghi chú.
+- **Thực thể là ghi chú, không phải chuỗi ký tự.** `[[Bob]]`, `[[Bob#Role]]`, `[[People/Bob]]`, `[[Bob|B.]]` và tên cũ trong mục `aliases:` của một ghi chú đã đổi tên đều trỏ đến cùng một nút. Hai ghi chú trùng tên tệp ở các thư mục khác nhau sẽ nhận tên kèm đường dẫn, chẳng hạn `People/Alice` và `Archive/Alice`.
+- **Quan hệ ngữ nghĩa** (mũi tên đậm) được LLM trích xuất từ các đoạn văn bản và giữ liên kết đến đoạn nguồn của chúng (mũi tên nét đứt), nhờ đó câu trả lời có thể trích dẫn nguồn. Các quan hệ LLM cụ thể phụ thuộc vào mô hình được dùng.
+
 ## Giao diện web
 
 ### 1. Đặt câu hỏi có căn cứ và mở nguồn trích dẫn

@@ -39,6 +39,42 @@ Kwipu 可将文档文件夹转换为属性图 RAG 索引，你可以通过交互
 - 支持英语、意大利语、法语、德语、西班牙语和葡萄牙语模式。
 - 通过终端、Web API 和 MCP 提供同一套知识。
 
+### 从笔记到图
+
+以 `knowledge_base/examples/Alice.md` 为例：
+
+```markdown
+---
+tags: [person, team]
+role: Frontend Lead
+project: Project Alpha
+---
+# Alice
+
+Frontend Lead on [[Project Alpha]].
+- Collaborates with [[Bob]] on API integration
+```
+
+Kwipu 将 frontmatter 和 wikilink 读取为结构关系，并请 LLM 从正文中提取语义关系：
+
+```mermaid
+flowchart LR
+    alice(("Alice<br/>笔记 Alice.md"))
+    chunk["📄 Alice.md 的文本分块"]
+
+    alice -- "Has role<br/>(frontmatter · role · 第 3 行)" --> fl["Frontend Lead"]
+    alice -- "Participates in<br/>(frontmatter · project · 第 4 行)" --> pa(("Project Alpha"))
+    alice -- "Has tag<br/>(frontmatter · tags · 第 2 行)" --> tag["person · team"]
+    alice -- "Collaborates with<br/>(wikilink · 第 13 行)" --> bob(("Bob"))
+    alice -- "Is related to<br/>(wikilink · 第 9 行)" --> pa
+    alice == "Specializes in<br/>(LLM，示意)" ==> react["React"]
+    chunk -. "来源" .-> react
+```
+
+- **结构关系**来自 frontmatter 键，以及每个 `[[wikilink]]` 之前的词语（此处为 *collaborates with*）。如果没有匹配的模式，关系会回退为该行语言中的 *Is related to*。每条结构关系都会记录其出处：来源类型、文件、frontmatter 字段、行号以及笔记内容的哈希值。
+- **实体是笔记，而不是字符串。** `[[Bob]]`、`[[Bob#Role]]`、`[[People/Bob]]`、`[[Bob|B.]]`，以及已重命名笔记在 `aliases:` 中的旧名称，都会解析到同一个节点。不同文件夹中同名的两篇笔记会获得带路径的名称，例如 `People/Alice` 和 `Archive/Alice`。
+- **语义关系**（粗箭头）由 LLM 从文本分块中提取，并保留指向其来源分块的链接（虚线箭头），因此回答可以引用来源。具体的 LLM 关系取决于所用模型。
+
 ## Web 界面
 
 ### 1. 提出有来源依据的问题并打开其来源
