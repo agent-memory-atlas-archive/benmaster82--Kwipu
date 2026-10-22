@@ -1,0 +1,35 @@
+# Dependabot version updates. Security alerts and security updates are
+# enabled in the repository settings and cover every ecosystem, Python too.
+#
+# Python is intentionally absent here: CI installs from hashed, per-platform
+# pip-compile lock files (requirements-dev.lock, requirements-dev-windows.lock)
+# that Dependabot cannot regenerate, so its PRs would change requirements.txt
+# while CI kept testing the old locked versions. Regenerate the locks with the
+# pip-compile command recorded in their headers instead.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    # Let new releases settle before proposing them; security updates skip
+    # the cooldown.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      frontend-minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
