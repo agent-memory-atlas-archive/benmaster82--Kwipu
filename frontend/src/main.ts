@@ -52,7 +52,6 @@ const COLORS = {
   chunk: "rgba(255, 255, 255, 0.55)",
   linkSemantic: "rgba(255, 255, 255, 0.32)",
   linkProvenance: "rgba(255, 255, 255, 0.10)",
-  highlight: "#ffffff",
   highlightLink: "rgba(255, 255, 255, 0.85)",
   dim: "rgba(255, 255, 255, 0.06)",
   dimLink: "rgba(255, 255, 255, 0.03)",
@@ -240,7 +239,7 @@ const Graph = new ForceGraph3D<GraphNode, GraphLink>(elGraph)
     const roleColor = ROLE_COLORS[graphIndex.roles.get(node.id) ?? "entity"];
     if (focusedId) return focusIds.has(node.id) ? roleColor : COLORS.dim;
     if (highlightedIds.size > 0) {
-      return highlightedIds.has(node.id) ? COLORS.highlight : COLORS.dim;
+      return highlightedIds.has(node.id) ? roleColor : COLORS.dim;
     }
     return roleColor;
   })
@@ -266,15 +265,24 @@ const Graph = new ForceGraph3D<GraphNode, GraphLink>(elGraph)
         link.label,
       )}</span>`,
   )
-  // Particles only flow along the focused node's links: motion where the
-  // user is looking, no animation cost everywhere else.
-  .linkDirectionalParticles((link) => (isFocusLink(link) ? 2 : 0))
+  // Particles only flow where the user is looking — the focused node's links,
+  // or the links within an answer's highlighted nodes — and nowhere else.
+  .linkDirectionalParticles((link) => (isActiveLink(link) ? 2 : 0))
   .linkDirectionalParticleSpeed(0.006)
   .linkDirectionalParticleWidth(1.6)
   .linkDirectionalParticleColor(() => COLORS.particle)
   .onNodeHover((node) => showHover(node))
   .onNodeClick((node) => openPreview(node))
   .onBackgroundClick(() => closePreview());
+
+function isActiveLink(link: GraphLink): boolean {
+  if (focusedId) return isFocusLink(link);
+  return (
+    highlightedIds.size > 0 &&
+    highlightedIds.has(endId(link.source)) &&
+    highlightedIds.has(endId(link.target))
+  );
+}
 
 function isFocusLink(link: GraphLink): boolean {
   return (
