@@ -1125,6 +1125,52 @@ class RagStorageLifecycleTests(unittest.TestCase):
         self.assertEqual(rag.index, "old-index")
 
 
+class FileWatcherEventMergeTests(unittest.TestCase):
+    def merged(self, *event_types: str) -> str:
+        watcher = object.__new__(geode_graph.FileWatcher)
+        watcher._lock = threading.Lock()
+        watcher._pending_events = {}
+        watcher._timer = None
+        with mock.patch.object(geode_graph.threading, "Timer"):
+            for event_type in event_types:
+                watcher._schedule_processing(event_type, "note.md")
+        (event_type, _), = watcher._pending_events.values()
+        return event_type
+
+    def test_new_file_saved_in_steps_stays_an_incremental_creation(self):
+        self.assertEqual(self.merged("created", "modified"), "created")
+        self.assertEqual(self.merged("created", "modified", "modified"), "created")
+
+    def test_existing_file_changes_still_force_a_rebuild(self):
+        self.assertEqual(self.merged("modified"), "modified")
+        self.assertEqual(self.merged("modified", "created"), "modified")
+        self.assertEqual(self.merged("deleted", "created"), "deleted")
+        self.assertEqual(self.merged("created", "deleted"), "deleted")
+        self.assertEqual(self.merged("created", "modified", "deleted"), "deleted")
+
+
+class FileWatcherDispatchTests(unittest.TestCase):
+    def test_debounced_work_runs_through_dispatch_when_given(self):
+        dispatched = []
+        watcher = object.__new__(geode_graph.FileWatcher)
+        watcher._dispatch = dispatched.append
+        with mock.patch.object(watcher, "_process_pending") as process:
+            watcher._dispatch_pending()
+            process.assert_not_called()
+            self.assertEqual(len(dispatched), 1)
+            dispatched[0]()
+
+        process.assert_called_once_with()
+
+    def test_debounced_work_runs_inline_without_dispatch(self):
+        watcher = object.__new__(geode_graph.FileWatcher)
+        watcher._dispatch = None
+        with mock.patch.object(watcher, "_process_pending") as process:
+            watcher._dispatch_pending()
+
+        process.assert_called_once_with()
+
+
 class FileWatcherCheckpointTests(unittest.TestCase):
     @staticmethod
     def _watcher(

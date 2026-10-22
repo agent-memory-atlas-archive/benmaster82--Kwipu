@@ -13,6 +13,7 @@ import csv
 import hashlib
 import io
 import math
+import queue
 import re
 import shutil
 import time
@@ -1783,8 +1784,15 @@ def _save_hash_cache(hashes: dict[str, str]):
 
 
 class FileWatcher(FileSystemEventHandler):
-    def __init__(self, rag_system):
+    def __init__(self, rag_system, dispatch=None):
+        """``dispatch`` runs debounced work on the caller's thread when given.
+
+        LLM and embedding clients keep async connections bound to the event
+        loop that opened them, so indexing must run on the same thread that
+        answers questions instead of on the debounce timer's thread.
+        """
         self.rag_system = rag_system
+        self._dispatch = dispatch
         self._lock = threading.Lock()
         self._pending_events: dict[str, tuple[str, float]] = {}
         self._timer = None
@@ -1869,14 +1877,24 @@ class FileWatcher(FileSystemEventHandler):
                 # an atomic replacement and must still force a full rebuild.
                 if _WATCHER_EVENT_PRIORITY[previous_type] > _WATCHER_EVENT_PRIORITY[event_type]:
                     event_type = previous_type
+                # Saving a new file emits created→modified; the file did not
+                # exist before this batch, so it is still an incremental insert.
+                elif previous_type == "created" and event_type == "modified":
+                    event_type = "created"
             self._pending_events[normalized_path] = (event_type, time.time())
             if self._timer is not None:
                 self._timer.cancel()
             self._timer = threading.Timer(
-                WATCHER_DEBOUNCE_SECONDS, self._process_pending
+                WATCHER_DEBOUNCE_SECONDS, self._dispatch_pending
             )
             self._timer.daemon = True
             self._timer.start()
+
+    def _dispatch_pending(self):
+        if self._dispatch is None:
+            self._process_pending()
+        else:
+            self._dispatch(self._process_pending)
 
     def _process_pending(self):
         with self._lock:
@@ -2057,44 +2075,79 @@ def main():
         )
         return 2
 
+    # Questions and watcher updates share this thread, so every LLM and
+    # embedding call runs on one event loop. Only reading input is threaded.
+    work: "queue.Queue[tuple[str, object]]" = queue.Queue()
+    prompt_ready = threading.Event()
+    prompt_ready.set()
+
     observer = Observer()
-    observer.schedule(FileWatcher(rag), KNOWLEDGE_DIR, recursive=True)
+    observer.schedule(
+        FileWatcher(rag, dispatch=lambda job: work.put(("job", job))),
+        KNOWLEDGE_DIR,
+        recursive=True,
+    )
     observer.start()
 
+    def read_questions():
+        while True:
+            prompt_ready.wait()
+            prompt_ready.clear()
+            try:
+                line = console.input("[bold bright_white]>[/bold bright_white] ")
+            except EOFError:
+                work.put(("exit", None))
+                return
+            work.put(("question", line))
+
     console.print("[dim]Type your question, or 'exit' to quit.[/dim]\n")
+    threading.Thread(target=read_questions, name="kwipu-input", daemon=True).start()
 
     try:
         while True:
             try:
-                query = console.input("[bold bright_white]>[/bold bright_white] ")
-            except EOFError:
-                break
-
-            if query.lower().strip() in ["exit", "quit", "esci"]:
-                break
-
-            try:
-                query = validate_question(query)
-            except QueryValidationError as exc:
-                console.print(f"[yellow]{exc}[/yellow]")
+                kind, payload = work.get(timeout=0.5)
+            except queue.Empty:
                 continue
 
-            with Status("[dim]Querying graph...[/dim]", console=console, spinner="dots"):
-                start_t = time.time()
-                response = rag.ask(query)
-                elapsed = time.time() - start_t
+            if kind == "exit":
+                break
+            if kind == "job":
+                try:
+                    payload()
+                except Exception as exc:
+                    console.print(f"[red]Document update failed: {exc}[/red]")
+                continue
 
-            console.print()
-            console.print(
-                Panel(
-                    Markdown(str(response)),
-                    title="[bold]Response[/bold]",
-                    subtitle=f"[dim]{elapsed:.1f}s[/dim]",
-                    border_style="bright_black",
-                    padding=(1, 2),
+            try:
+                query = payload
+                if query.lower().strip() in ["exit", "quit", "esci"]:
+                    break
+
+                try:
+                    query = validate_question(query)
+                except QueryValidationError as exc:
+                    console.print(f"[yellow]{exc}[/yellow]")
+                    continue
+
+                with Status("[dim]Querying graph...[/dim]", console=console, spinner="dots"):
+                    start_t = time.time()
+                    response = rag.ask(query)
+                    elapsed = time.time() - start_t
+
+                console.print()
+                console.print(
+                    Panel(
+                        Markdown(str(response)),
+                        title="[bold]Response[/bold]",
+                        subtitle=f"[dim]{elapsed:.1f}s[/dim]",
+                        border_style="bright_black",
+                        padding=(1, 2),
+                    )
                 )
-            )
-            console.print()
+                console.print()
+            finally:
+                prompt_ready.set()
 
     except KeyboardInterrupt:
         pass
