@@ -10,6 +10,7 @@
 [![LlamaIndex](https://img.shields.io/badge/framework-LlamaIndex-purple.svg)](https://www.llamaindex.ai/)
 [![Obsidian Compatible](https://img.shields.io/badge/Obsidian-compatible-7C3AED.svg)](https://obsidian.md/)
 [![MCP Server](https://img.shields.io/badge/MCP-compatible-blue.svg)](https://modelcontextprotocol.io/)
+[![Website](https://img.shields.io/badge/website-benmaster82.github.io%2FKwipu-black.svg)](https://benmaster82.github.io/Kwipu/)
 
 **English** | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md)
 
