@@ -61,30 +61,37 @@ export default defineConfig(({ mode }) => {
         : undefined,
     },
     build: {
-      rollupOptions: {
+      rolldownOptions: {
         output: {
-          manualChunks(moduleId) {
-            const id = moduleId.replaceAll("\\", "/");
-            if (!id.includes("/node_modules/")) return undefined;
-            if (id.includes("/node_modules/three/examples/")) {
-              return "vendor-three-extras";
-            }
-            if (id.includes("/node_modules/three/build/three.core")) {
-              return "vendor-three-core";
-            }
-            if (id.includes("/node_modules/three/")) {
-              return "vendor-three-renderer";
-            }
-            if (
-              id.includes("/node_modules/d3-") ||
-              id.includes("/node_modules/ngraph.") ||
-              id.includes("/node_modules/internmap/") ||
-              id.includes("/node_modules/delaunator/") ||
-              id.includes("/node_modules/robust-predicates/")
-            ) {
-              return "vendor-layout";
-            }
-            return "vendor-graph";
+          // Separate vendor chunks cache independently across releases. The
+          // highest-priority matching group wins, and groups keep only the
+          // modules they match: by default Rolldown pulls each module's
+          // dependencies (three.js) into the group that captured it.
+          codeSplitting: {
+            includeDependenciesRecursively: false,
+            groups: [
+              {
+                name: "vendor-three-extras",
+                test: /[\\/]node_modules[\\/]three[\\/]examples[\\/]/,
+                priority: 50,
+              },
+              {
+                name: "vendor-three-core",
+                test: /[\\/]node_modules[\\/]three[\\/]build[\\/]three\.core/,
+                priority: 40,
+              },
+              {
+                name: "vendor-three-renderer",
+                test: /[\\/]node_modules[\\/]three[\\/]/,
+                priority: 30,
+              },
+              {
+                name: "vendor-layout",
+                test: /[\\/]node_modules[\\/](d3-|ngraph\.|internmap[\\/]|delaunator[\\/]|robust-predicates[\\/])/,
+                priority: 20,
+              },
+              { name: "vendor-graph", test: /[\\/]node_modules[\\/]/, priority: 10 },
+            ],
           },
         },
       },
