@@ -39,6 +39,42 @@ Kwipu turns a folder of documents into a property-graph RAG index that you can e
 - Supports English, Italian, French, German, Spanish, and Portuguese patterns.
 - Exposes the same knowledge through the terminal, web API, and MCP.
 
+### From a note to the graph
+
+Take `knowledge_base/examples/Alice.md`:
+
+```markdown
+---
+tags: [person, team]
+role: Frontend Lead
+project: Project Alpha
+---
+# Alice
+
+Frontend Lead on [[Project Alpha]].
+- Collaborates with [[Bob]] on API integration
+```
+
+Kwipu reads the frontmatter and the wikilinks into structural relations, and asks the LLM for semantic relations in the text:
+
+```mermaid
+flowchart LR
+    alice(("Alice<br/>note Alice.md"))
+    chunk["📄 text chunk of Alice.md"]
+
+    alice -- "Has role<br/>(frontmatter · role · line 3)" --> fl["Frontend Lead"]
+    alice -- "Participates in<br/>(frontmatter · project · line 4)" --> pa(("Project Alpha"))
+    alice -- "Has tag<br/>(frontmatter · tags · line 2)" --> tag["person · team"]
+    alice -- "Collaborates with<br/>(wikilink · line 13)" --> bob(("Bob"))
+    alice -- "Is related to<br/>(wikilink · line 9)" --> pa
+    alice == "Specializes in<br/>(LLM, illustrative)" ==> react["React"]
+    chunk -. "source" .-> react
+```
+
+- **Structural relations** come from frontmatter keys and from the words before each `[[wikilink]]` (here *collaborates with*). When no pattern matches, the relation falls back to *Is related to* in the line's language. Each one records where it came from: origin, file, frontmatter field, line, and a hash of the note's content.
+- **Entities are notes, not strings.** `[[Bob]]`, `[[Bob#Role]]`, `[[People/Bob]]`, `[[Bob|B.]]`, and an `aliases:` entry of a renamed note all resolve to the same node. Two notes with the same file name in different folders get path-qualified names, such as `People/Alice` and `Archive/Alice`.
+- **Semantic relations** (thick arrow) are extracted by the LLM from text chunks and keep a link to their source chunk (dotted arrow), so answers can cite it. The exact LLM relations depend on the model.
+
 ## Web interface
 
 ### 1. Ask a grounded question and open its sources
