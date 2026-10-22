@@ -58,6 +58,12 @@ class GraphLink(ApiModel):
     target: str
     label: str
     kind: Literal["semantic", "provenance"]
+    # Provenance of structural relations (wikilinks and frontmatter); absent
+    # for relations extracted by the LLM.
+    origin: Literal["wikilink", "frontmatter"] | None = None
+    field: str | None = None
+    line: int | None = None
+    file_path: str | None = None
 
 
 class SnapshotStats(ApiModel):

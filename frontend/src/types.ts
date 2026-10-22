@@ -18,6 +18,11 @@ export interface SnapshotLink {
   target: string;
   label: string;
   kind: "semantic" | "provenance";
+  /** Structural provenance; absent for relations extracted by the LLM. */
+  origin?: "wikilink" | "frontmatter" | null;
+  field?: string | null;
+  line?: number | null;
+  file_path?: string | null;
 }
 
 export interface GraphLink extends LinkObject<GraphNode> {
@@ -25,6 +30,11 @@ export interface GraphLink extends LinkObject<GraphNode> {
   target: string | GraphNode;
   label: string;
   kind: "semantic" | "provenance";
+  /** Structural provenance; absent for relations extracted by the LLM. */
+  origin?: "wikilink" | "frontmatter" | null;
+  field?: string | null;
+  line?: number | null;
+  file_path?: string | null;
 }
 
 export interface PropertyGraphHealth {

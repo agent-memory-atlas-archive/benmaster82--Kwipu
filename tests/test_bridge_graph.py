@@ -230,6 +230,57 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual({node.id for node in snapshot.nodes}, {"Team/Dana", "QA"})
         self.assertEqual(snapshot.stats.skipped_noisy, 2)
 
+    def test_semantic_links_expose_structural_provenance_only(self):
+        data = {
+            "nodes": {
+                "Alice": {"label": "entity", "properties": {}},
+                "Lead": {"label": "entity", "properties": {}},
+                "Bob": {"label": "entity", "properties": {}},
+            },
+            "relations": {
+                "r1": {
+                    "source_id": "Alice",
+                    "target_id": "Lead",
+                    "label": "Has role",
+                    "properties": {
+                        "origin": "frontmatter",
+                        "field": "role",
+                        "line": 3,
+                        "file_path": str(self.knowledge / "Alice.md"),
+                        "source_hash": "abc",
+                    },
+                },
+                "r2": {
+                    "source_id": "Alice",
+                    "target_id": "Bob",
+                    "label": "Knows",
+                    "properties": {"file_path": "/outside/secret.md"},
+                },
+                "r3": {
+                    "source_id": "Bob",
+                    "target_id": "Lead",
+                    "label": "Mentions",
+                    "properties": {
+                        "origin": "wikilink",
+                        "line": 2,
+                        "file_path": "/outside/Bob.md",
+                    },
+                },
+            },
+        }
+        with mock.patch.object(graph, "load_property_graph", return_value=data):
+            snapshot = graph.load_snapshot()
+
+        links = {link.label: link for link in snapshot.links}
+        self.assertEqual(
+            links["Has role"].model_dump(exclude={"source", "target", "label", "kind"}),
+            {"origin": "frontmatter", "field": "role", "line": 3, "file_path": "Alice.md"},
+        )
+        self.assertIsNone(links["Knows"].origin)
+        self.assertIsNone(links["Knows"].file_path)
+        self.assertEqual(links["Mentions"].origin, "wikilink")
+        self.assertIsNone(links["Mentions"].file_path)
+
     def test_chunk_and_provenance_links_follow_include_chunks_filter(self):
         with mock.patch.object(graph, "load_property_graph", return_value=self._data()):
             snapshot = graph.load_snapshot(include_chunks=False)

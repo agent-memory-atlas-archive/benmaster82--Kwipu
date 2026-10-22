@@ -181,7 +181,7 @@ Example response shape:
 }
 ```
 
-`GraphNode.type` is `entity` or `chunk`; nullable fields remain present because they are part of the response model. `GraphLink.kind` is `semantic` or `provenance`. The loader skips malformed individual records and reports those counts in `stats`. Missing, corrupt, busy, or unreadable storage returns HTTP `503`.
+`GraphNode.type` is `entity` or `chunk`; nullable fields remain present because they are part of the response model. `GraphLink.kind` is `semantic` or `provenance`. Semantic links derived from note structure also carry `origin` (`wikilink` or `frontmatter`), the frontmatter `field`, the 1-based source `line`, and the knowledge-relative `file_path`; these fields are `null` for LLM-extracted relations and provenance links, and paths outside the knowledge base are never exposed. The loader skips malformed individual records and reports those counts in `stats`. Missing, corrupt, busy, or unreadable storage returns HTTP `503`.
 
 ## `POST /query`
 

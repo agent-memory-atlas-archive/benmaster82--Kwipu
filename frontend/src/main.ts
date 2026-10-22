@@ -17,6 +17,20 @@ import {
   type SnapshotResponse,
   type SnapshotStats,
 } from "./types";
+import {
+  ROLE_LABELS,
+  buildIndex,
+  endId,
+  escapeHtml,
+  neighborhood,
+  nodeTitle,
+  renderContextCard,
+  resolveLinkTarget,
+  wikilinkAnchor,
+  type CardSource,
+  type GraphIndex,
+  type NodeRole,
+} from "./context";
 
 type ForceGraph3DConstructor = {
   new <
@@ -44,6 +58,15 @@ const COLORS = {
   dimLink: "rgba(255, 255, 255, 0.03)",
   particle: "#ffffff",
 };
+
+// Muted tints keep the monochrome look while telling node roles apart.
+const ROLE_COLORS: Record<NodeRole, string> = {
+  note: "#ffffff",
+  value: "#e8c27a",
+  entity: "#8fb8ff",
+  chunk: "rgba(255, 255, 255, 0.45)",
+};
+const MAX_FOCUS_LABELS = 16;
 
 function requireElement<ElementType extends Element>(selector: string): ElementType {
   const element = document.querySelector<ElementType>(selector);
@@ -172,6 +195,16 @@ let queryRequestGeneration = 0;
 let queryAbortController: AbortController | null = null;
 let previewRequestGeneration = 0;
 let previewAbortController: AbortController | null = null;
+let graphIndex: GraphIndex = buildIndex([], []);
+let focusedId: string | null = null;
+let focusIds = new Set<string>();
+let previewState: {
+  node: GraphNode;
+  source: CardSource | null;
+  sourceState: "loading" | "ready" | "unavailable";
+  markdown: string | null;
+  showFull: boolean;
+} | null = null;
 
 const elGraph = requireElement<HTMLElement>("#graph");
 const elStats = requireElement<HTMLElement>("#stats");
@@ -204,10 +237,12 @@ const Graph = new ForceGraph3D<GraphNode, GraphLink>(elGraph)
       )}</span>`,
   )
   .nodeColor((node) => {
+    const roleColor = ROLE_COLORS[graphIndex.roles.get(node.id) ?? "entity"];
+    if (focusedId) return focusIds.has(node.id) ? roleColor : COLORS.dim;
     if (highlightedIds.size > 0) {
       return highlightedIds.has(node.id) ? COLORS.highlight : COLORS.dim;
     }
-    return node.type === "entity" ? COLORS.entity : COLORS.chunk;
+    return roleColor;
   })
   .nodeOpacity(0.95)
   .nodeVal((node) => {
@@ -215,6 +250,7 @@ const Graph = new ForceGraph3D<GraphNode, GraphLink>(elGraph)
     return Math.max(1.5, Math.min(10, (node.degree ?? 1) * 1.1));
   })
   .linkColor((link) => {
+    if (focusedId) return isFocusLink(link) ? COLORS.highlightLink : COLORS.dimLink;
     if (highlightedIds.size > 0) {
       const sourceId = typeof link.source === "string" ? link.source : link.source.id;
       const targetId = typeof link.target === "string" ? link.target : link.target.id;
@@ -224,12 +260,67 @@ const Graph = new ForceGraph3D<GraphNode, GraphLink>(elGraph)
     return link.kind === "provenance" ? COLORS.linkProvenance : COLORS.linkSemantic;
   })
   .linkWidth((link) => (link.kind === "provenance" ? 0.4 : 0.8))
-  .linkDirectionalParticles(1)
-  .linkDirectionalParticleSpeed(0.004)
-  .linkDirectionalParticleWidth(1.4)
+  .linkLabel(
+    (link) =>
+      `<span style="font-family: inherit; font-size: 11px; color: #fff; background: rgba(0,0,0,0.85); padding: 3px 7px; border-radius: 4px;">${escapeHtml(
+        link.label,
+      )}</span>`,
+  )
+  // Particles only flow along the focused node's links: motion where the
+  // user is looking, no animation cost everywhere else.
+  .linkDirectionalParticles((link) => (isFocusLink(link) ? 2 : 0))
+  .linkDirectionalParticleSpeed(0.006)
+  .linkDirectionalParticleWidth(1.6)
   .linkDirectionalParticleColor(() => COLORS.particle)
   .onNodeHover((node) => showHover(node))
-  .onNodeClick((node) => openPreview(node));
+  .onNodeClick((node) => openPreview(node))
+  .onBackgroundClick(() => closePreview());
+
+function isFocusLink(link: GraphLink): boolean {
+  return (
+    focusedId !== null &&
+    (endId(link.source) === focusedId || endId(link.target) === focusedId)
+  );
+}
+
+function refreshGraphStyles() {
+  Graph.nodeColor(Graph.nodeColor())
+    .linkColor(Graph.linkColor())
+    .linkDirectionalParticles(Graph.linkDirectionalParticles());
+}
+
+// HTML labels for the focused neighborhood only: a handful of DOM nodes
+// instead of one text sprite per graph node.
+const elLabels = document.createElement("div");
+elLabels.className = "focus-labels";
+elGraph.appendChild(elLabels);
+let focusLabelNodes: GraphNode[] = [];
+
+function renderFocusLabels() {
+  const ids = [...focusIds];
+  focusLabelNodes = ids
+    .map((id) => graphIndex.nodes.get(id))
+    .filter((node): node is GraphNode => node !== undefined && node.type === "entity")
+    .sort((a, b) => (a.id === focusedId ? -1 : b.id === focusedId ? 1 : (b.degree ?? 0) - (a.degree ?? 0)))
+    .slice(0, MAX_FOCUS_LABELS);
+  elLabels.innerHTML = focusLabelNodes
+    .map(
+      (node) =>
+        `<span class="${node.id === focusedId ? "focus" : ""}">${escapeHtml(nodeTitle(node))}</span>`,
+    )
+    .join("");
+}
+
+function updateFocusLabels() {
+  if (focusLabelNodes.length === 0) return;
+  const spans = elLabels.children;
+  focusLabelNodes.forEach((node, position) => {
+    const span = spans[position] as HTMLElement | undefined;
+    if (!span || node.x == null || node.y == null || node.z == null) return;
+    const { x, y } = Graph.graph2ScreenCoords(node.x, node.y, node.z);
+    span.style.transform = `translate(${x}px, ${y}px)`;
+  });
+}
 
 // Idle rotation — gentle, breathing constellation.
 let userInteracting = false;
@@ -256,8 +347,9 @@ elGraph.addEventListener(
 
 function tickIdle() {
   requestAnimationFrame(tickIdle);
+  updateFocusLabels();
   if (userInteracting) return;
-  if (highlightedIds.size > 0) return;
+  if (highlightedIds.size > 0 || focusedId) return;
   if (Date.now() - lastInteractionAt < IDLE_AFTER_MS) return;
   const position = Graph.cameraPosition();
   const distance = Math.hypot(position.x, position.z);
@@ -325,8 +417,14 @@ async function loadGraph() {
       params,
     );
     if (requestGeneration !== graphRequestGeneration) return;
+    graphIndex = buildIndex(snapshot.nodes, snapshot.links);
     Graph.graphData({ nodes: snapshot.nodes, links: snapshot.links });
     visibleNodeIds = new Set(snapshot.nodes.map((node) => node.id));
+    if (focusedId) {
+      const node = graphIndex.nodes.get(focusedId);
+      if (node) void openPreview(node, { moveCamera: false });
+      else closePreview();
+    }
     sceneCounts = { nodes: snapshot.nodes.length, links: snapshot.links.length };
     elStats.innerHTML = formatStats(snapshot.stats);
     renderSceneMeta();
@@ -362,10 +460,11 @@ function showHover(node: GraphNode | null) {
         `<div><span class="k">${escapeHtml(key)}</span> · ${escapeHtml(String(value))}</div>`,
     )
     .join("");
+  const role = graphIndex.roles.get(node.id) ?? "entity";
   elHover.innerHTML = `
-    <span class="name">${escapeHtml(node.name ?? node.file_name ?? node.id)}</span>
+    <span class="name">${escapeHtml(nodeTitle(node))}</span>
     <div class="meta">
-      <div><span class="k">type</span> · ${node.type}${
+      <div><span class="k">type</span> · ${ROLE_LABELS[role]}${
         node.degree != null ? ` · degree ${node.degree}` : ""
       }</div>
       ${
@@ -376,20 +475,6 @@ function showHover(node: GraphNode | null) {
       ${frontmatterRows}
     </div>
   `;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(
-    /[&<>"']/g,
-    (character) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[character]!,
-  );
 }
 
 function uniqueIds(ids: string[]): string[] {
@@ -420,6 +505,7 @@ async function askQuestion() {
   const controller = new AbortController();
   queryAbortController = controller;
 
+  closePreview();
   elAsk.disabled = true;
   elAskStatus.classList.add("thinking");
   elAskStatus.textContent = "thinking";
@@ -468,7 +554,7 @@ function renderMarkdown(source: string): string {
 
 function highlightNodes(ids: string[]) {
   highlightedIds = new Set(ids);
-  Graph.nodeColor(Graph.nodeColor()).linkColor(Graph.linkColor());
+  refreshGraphStyles();
 }
 
 function clearHighlight() {
@@ -493,26 +579,84 @@ elQ.addEventListener("keydown", (event) => {
 elClearHighlight.addEventListener("click", clearHighlight);
 elPreviewClose.addEventListener("click", closePreview);
 
-async function openPreview(node: GraphNode) {
+function setFocus(id: string | null) {
+  focusedId = id;
+  focusIds = id ? neighborhood(graphIndex, id) : new Set();
+  renderFocusLabels();
+  refreshGraphStyles();
+}
+
+/**
+ * Fly the camera so the node and its neighbors fit the view, with the node
+ * centered in the area left uncovered by the preview card.
+ */
+function frameFocus(node: GraphNode) {
+  if (node.x == null || node.y == null || node.z == null) return;
+  const center = { x: node.x, y: node.y, z: node.z };
+  let radius = 20;
+  for (const id of focusIds) {
+    const other = graphIndex.nodes.get(id);
+    if (other?.x == null || other.y == null || other.z == null) continue;
+    radius = Math.max(
+      radius,
+      Math.hypot(other.x - center.x, other.y - center.y, other.z - center.z),
+    );
+  }
+  const camera = Graph.camera() as { fov?: number; aspect?: number };
+  const halfFov = (((camera.fov ?? 40) * Math.PI) / 180) / 2;
+  const aspect = camera.aspect ?? elGraph.clientWidth / Math.max(1, elGraph.clientHeight);
+  const distance = Math.min(900, Math.max(80, radius / (Math.tan(halfFov) * 0.85)));
+
+  // View from the side of the node facing away from the graph's origin.
+  const length = Math.max(1, Math.hypot(center.x, center.y, center.z));
+  const dir = { x: center.x / length, y: center.y / length, z: center.z / length };
+  // right = forward × up, with forward = -dir and up = +y.
+  let right = { x: dir.z, y: 0, z: -dir.x };
+  const rightLength = Math.hypot(right.x, right.z);
+  right = rightLength > 1e-6
+    ? { x: right.x / rightLength, y: 0, z: right.z / rightLength }
+    : { x: 1, y: 0, z: 0 };
+  const covered = elPreview.hidden ? 0 : elPreview.offsetWidth / Math.max(1, elGraph.clientWidth);
+  const shift = distance * Math.tan(halfFov) * aspect * covered;
+
+  Graph.cameraPosition(
+    {
+      x: center.x + dir.x * distance + right.x * shift,
+      y: center.y + dir.y * distance,
+      z: center.z + dir.z * distance + right.z * shift,
+    },
+    { x: center.x + right.x * shift, y: center.y, z: center.z + right.z * shift },
+    800,
+  );
+}
+
+function renderPreview() {
+  if (!previewState) return;
+  const { node, source, sourceState, markdown, showFull } = previewState;
+  if (showFull && markdown !== null) {
+    elPreviewBody.innerHTML = `
+      <button class="ctx-action ctx-back" data-action="context">← Context</button>
+      ${renderMarkdownBlock(markdown)}
+      <div class="preview-meta">${escapeHtml(source?.filePath ?? "")}</div>
+    `;
+    return;
+  }
+  elPreviewBody.innerHTML = renderContextCard(node, graphIndex, source, sourceState);
+}
+
+async function openPreview(node: GraphNode, options: { moveCamera?: boolean } = {}) {
   const requestGeneration = ++previewRequestGeneration;
   previewAbortController?.abort();
   const controller = new AbortController();
   previewAbortController = controller;
 
-  // Tween camera toward the node so the click feels meaningful.
-  if (node.x != null && node.y != null && node.z != null) {
-    const distance = 140;
-    const radialDistance = Math.max(1, Math.hypot(node.x, node.y, node.z));
-    const ratio = 1 + distance / radialDistance;
-    Graph.cameraPosition(
-      { x: node.x * ratio, y: node.y * ratio, z: node.z * ratio },
-      { x: node.x, y: node.y, z: node.z },
-      800,
-    );
-  }
-  elPreviewTitle.textContent = node.name ?? node.file_name ?? node.id;
-  elPreviewBody.innerHTML = `<em style="color: var(--fg-mute)">loading…</em>`;
+  setFocus(node.id);
+  previewState = { node, source: null, sourceState: "loading", markdown: null, showFull: false };
+  elPreviewTitle.textContent = nodeTitle(node);
   elPreview.hidden = false;
+  renderPreview();
+
+  if (options.moveCamera !== false) frameFocus(node);
   try {
     const params = new URLSearchParams({ node_id: node.id });
     const data = await fetchVersioned<ExpandResponse>(
@@ -520,28 +664,60 @@ async function openPreview(node: GraphNode) {
       { signal: controller.signal },
       params,
     );
-    if (requestGeneration !== previewRequestGeneration) return;
-    elPreviewTitle.textContent = data.file_name;
-    elPreviewBody.innerHTML = `
-      ${renderMarkdownBlock(data.markdown)}
-      <div class="preview-meta">${escapeHtml(data.file_path)}</div>
-    `;
+    if (requestGeneration !== previewRequestGeneration || !previewState) return;
+    previewState.source = { filePath: data.file_path, lines: data.markdown.split(/\r?\n/) };
+    previewState.markdown = data.markdown;
+    previewState.sourceState = "ready";
   } catch (error) {
-    if (requestGeneration !== previewRequestGeneration) return;
-    elPreviewBody.innerHTML = `<em style="color: var(--fg-mute)">${escapeHtml(
-      errorMessage(error),
-    )}</em>`;
+    if (requestGeneration !== previewRequestGeneration || !previewState) return;
+    if (controller.signal.aborted) return;
+    previewState.sourceState = "unavailable";
   } finally {
     if (previewAbortController === controller) previewAbortController = null;
   }
+  renderPreview();
 }
 
 function closePreview() {
   previewRequestGeneration += 1;
   previewAbortController?.abort();
   previewAbortController = null;
+  previewState = null;
   elPreview.hidden = true;
+  if (focusedId) setFocus(null);
 }
+
+function focusNodeById(id: string | null) {
+  const node = id ? graphIndex.nodes.get(id) : undefined;
+  if (node) void openPreview(node);
+}
+
+elPreviewBody.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement;
+  const nodeRef = target.closest<HTMLElement>("[data-node]");
+  if (nodeRef) {
+    focusNodeById(nodeRef.dataset.node ?? null);
+    return;
+  }
+  const wikilink = target.closest<HTMLElement>("[data-link]");
+  if (wikilink) {
+    event.preventDefault();
+    const id = resolveLinkTarget(graphIndex, wikilink.dataset.link ?? "");
+    if (id) focusNodeById(id);
+    else wikilink.classList.add("unresolved");
+    return;
+  }
+  const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
+  if (action && previewState) {
+    previewState.showFull = action === "full";
+    renderPreview();
+    elPreviewBody.scrollTop = 0;
+  }
+});
+
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !elPreview.hidden) closePreview();
+});
 
 function renderMarkdownBlock(source: string): string {
   // Lightweight markdown — enough for personal notes.
@@ -561,7 +737,7 @@ function renderMarkdownBlock(source: string): string {
   html = html.replace(/`([^`\n]+)`/g, "<code>$1</code>");
   html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "<em>$1</em>");
-  html = html.replace(/\[\[([^\]]+)\]\]/g, '<a href="#">$1</a>');
+  html = html.replace(/\[\[([^\]]+)\]\]/g, (_, inner: string) => wikilinkAnchor(inner));
   html = html.replace(/\n\n/g, "</p><p>");
   return `<p>${html}</p>`;
 }

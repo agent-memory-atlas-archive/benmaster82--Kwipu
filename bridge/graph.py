@@ -187,6 +187,23 @@ def _is_structural(relation_props: dict[str, Any]) -> bool:
     return relation_props.get("origin") in _STRUCTURAL_ORIGINS
 
 
+def _link_provenance(relation_props: dict[str, Any]) -> dict[str, Any]:
+    """Public provenance fields of a structural relation, for the snapshot."""
+    if not _is_structural(relation_props):
+        return {}
+    provenance: dict[str, Any] = {"origin": relation_props["origin"]}
+    field = relation_props.get("field")
+    if isinstance(field, str) and field:
+        provenance["field"] = field
+    line = relation_props.get("line")
+    if isinstance(line, int) and not isinstance(line, bool) and line > 0:
+        provenance["line"] = line
+    resolved = _resolve_metadata_path(relation_props.get("file_path"))
+    if resolved is not None:
+        provenance["file_path"] = resolved[1]
+    return provenance
+
+
 def _note_entities(relations: list[tuple[str, str, str, dict[str, Any]]]) -> set[str]:
     """Entities standing for notes: structural subjects and wikilink targets.
 
@@ -345,16 +362,20 @@ def load_snapshot(
     links: list[GraphLink] = []
     seen_links: set[tuple[str, str, str, str]] = set()
 
-    def add_link(source: str, target: str, label: str, kind: str) -> None:
+    def add_link(
+        source: str, target: str, label: str, kind: str, **provenance: Any
+    ) -> None:
         key = (source, target, label, kind)
         if key in seen_links:
             return
         seen_links.add(key)
-        links.append(GraphLink(source=source, target=target, label=label, kind=kind))
+        links.append(
+            GraphLink(source=source, target=target, label=label, kind=kind, **provenance)
+        )
 
     for source, target, label, props in relations:
         if source in kept_types and target in kept_types:
-            add_link(source, target, label, "semantic")
+            add_link(source, target, label, "semantic", **_link_provenance(props))
 
         if not include_chunks:
             continue

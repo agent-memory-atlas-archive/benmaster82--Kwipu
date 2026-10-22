@@ -30,6 +30,12 @@
 
       <section class="controls">
         <div class="group-label">View</div>
+        <div class="legend" aria-label="node colors">
+          <span><i class="dot role-note"></i>note</span>
+          <span><i class="dot role-value"></i>attribute</span>
+          <span><i class="dot role-entity"></i>LLM entity</span>
+          <span><i class="dot role-chunk"></i>chunk</span>
+        </div>
         <label>
           <input type="checkbox" id="opt-chunks" checked />
           include source chunks
@@ -57,7 +63,7 @@
     <section class="preview" id="preview" hidden>
       <header class="preview-head">
         <div>
-          <div class="preview-label">Source</div>
+          <div class="preview-label">Context</div>
           <div class="preview-title" id="preview-title"></div>
         </div>
         <button class="preview-close" id="preview-close" aria-label="close">×</button>

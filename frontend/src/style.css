@@ -422,6 +422,129 @@ button#reload:hover { border-color: var(--fg); color: var(--fg); }
   padding-top: 10px;
 }
 
+/* ---------------------------------------------------------- ROLES */
+.role-note { --role: #ffffff; }
+.role-value { --role: #e8c27a; }
+.role-entity { --role: #8fb8ff; }
+.role-chunk { --role: rgba(255, 255, 255, 0.45); }
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 10.5px;
+  color: var(--fg-mute);
+}
+.legend .dot {
+  display: inline-block;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--role);
+  margin-right: 5px;
+}
+
+/* ---------------------------------------------------------- CONTEXT CARD */
+.ctx-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.role-badge {
+  border: 1px solid var(--role);
+  color: var(--role);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ctx-source {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  word-break: break-all;
+}
+.ctx-section { margin: 0 0 14px; animation: fade-in 0.25s ease-out; }
+.ctx-section h4 {
+  margin: 0 0 6px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg-mute);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.rel {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 3px 0;
+}
+.rel-label { color: var(--fg-mute); font-size: 11.5px; }
+.rel-meta {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--fg-faint);
+}
+.node-ref {
+  background: none;
+  border: none;
+  border-bottom: 1px solid transparent;
+  padding: 0;
+  color: var(--role);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.node-ref:hover { border-bottom-color: var(--role); }
+.snippet {
+  margin: 2px 0 8px;
+  padding: 5px 10px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--fg-soft);
+  font-size: 11.5px;
+  background: var(--surface);
+  border-radius: 0 4px 4px 0;
+}
+.wikilink { cursor: pointer; }
+.wikilink.unresolved { text-decoration-style: dashed !important; color: var(--fg-mute) !important; }
+.ctx-more, .ctx-empty { color: var(--fg-faint); font-size: 11px; font-style: italic; }
+.ctx-action {
+  margin-top: 4px;
+  background: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--fg-soft);
+  font: 500 11px/1 var(--font-sans);
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+.ctx-action:hover { border-color: var(--fg); color: var(--fg); }
+.ctx-back { margin: 0 0 12px; }
+
+/* ---------------------------------------------------------- FOCUS LABELS */
+.focus-labels {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  overflow: hidden;
+}
+.focus-labels span {
+  position: absolute;
+  left: 0; top: 0;
+  margin: 10px 0 0 8px;
+  font-size: 11px;
+  color: var(--fg-soft);
+  text-shadow: 0 0 6px #000, 0 0 2px #000;
+  white-space: nowrap;
+  will-change: transform;
+}
+.focus-labels span.focus { color: var(--fg); font-weight: 500; font-size: 12px; }
+
 .scene-meta {
   position: fixed;
   bottom: 14px; right: 18px;
