@@ -71,6 +71,7 @@ from llama_index.core.indices.property_graph import (
     VectorContextRetriever,
     CustomPGRetriever,
 )
+from llama_index.core.graph_stores.types import EntityNode, Relation
 from llama_index.core.schema import NodeWithScore, TextNode, Document
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
@@ -1168,11 +1169,22 @@ class WritHerGraphRAG:
         if not target_index or not triples:
             return
         graph_store = target_index.property_graph_store
+        names = {name for subj, _, obj in triples for name in (subj, obj)}
+        # upsert_nodes replaces nodes by id: keep LLM-extracted entities intact.
+        existing_ids = {node.id for node in graph_store.get(ids=list(names))}
+        new_nodes = {}
+        relations = []
         for subj, rel, obj in triples:
-            try:
-                graph_store.upsert_triplet(subj, rel, obj)
-            except Exception:
-                pass
+            subj_node = EntityNode(name=subj)
+            obj_node = EntityNode(name=obj)
+            for node in (subj_node, obj_node):
+                if node.id not in existing_ids:
+                    new_nodes.setdefault(node.id, node)
+            relations.append(
+                Relation(label=rel, source_id=subj_node.id, target_id=obj_node.id)
+            )
+        graph_store.upsert_nodes(list(new_nodes.values()))
+        graph_store.upsert_relations(relations)
 
     def _build_index_unlocked(self):
         """Analyze files and build the graph."""

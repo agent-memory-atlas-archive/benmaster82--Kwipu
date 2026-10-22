@@ -102,6 +102,40 @@ class FrontmatterAndWikilinkTests(unittest.TestCase):
         self.assertEqual(triples[1][0::2], ("Alice", "Bob"))
 
 
+class StructuralTripleInjectionTests(unittest.TestCase):
+    def test_injects_triples_into_real_property_graph_store(self):
+        from llama_index.core.graph_stores import SimplePropertyGraphStore
+
+        store = SimplePropertyGraphStore()
+        store.upsert_nodes(
+            [geode_graph.EntityNode(name="Bob", properties={"origin": "llm"})]
+        )
+        rag = object.__new__(geode_graph.WritHerGraphRAG)
+        rag.index = mock.Mock(property_graph_store=store)
+
+        rag._inject_structural_triples(
+            [
+                ("Alice", "Collaborates with", "Bob"),
+                ("Alice", "Has role", "Frontend Lead"),
+            ]
+        )
+
+        triplets = {
+            (subj.id, rel.label, obj.id)
+            for subj, rel, obj in store.get_triplets(entity_names=["Alice"])
+        }
+        self.assertEqual(
+            triplets,
+            {
+                ("Alice", "Collaborates with", "Bob"),
+                ("Alice", "Has role", "Frontend Lead"),
+            },
+        )
+        self.assertEqual(
+            store.get(ids=["Bob"])[0].properties, {"origin": "llm"}
+        )
+
+
 class QuestionValidationTests(unittest.TestCase):
     def test_rejects_empty_question(self):
         with self.assertRaisesRegex(
