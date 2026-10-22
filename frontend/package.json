@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "3d-force-graph": "1.80.0"
+    "3d-force-graph": "1.80.1"
   },
   "devDependencies": {
     "typescript": "5.9.3",
