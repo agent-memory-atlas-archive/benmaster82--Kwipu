@@ -77,9 +77,11 @@ flowchart LR
 
 ## Web interface
 
+Click any node to open its context card: frontmatter attributes, links with the line they come from, backlinks, LLM-extracted relations, and source chunks. Clicking a name in the card flies to that node.
+
 ### 1. Ask a grounded question and open its sources
 
-![Kwipu answer with graph and source preview](img/second%20brain.jpeg)
+![Kwipu answer with the graph focused on a note and its context card](img/second%20brain.jpeg)
 
 ### 2. Reconstruct changes across meetings and reviews
 

@@ -77,9 +77,11 @@ flowchart LR
 
 ## Giao diện web
 
+Nhấp vào bất kỳ nút nào để mở thẻ ngữ cảnh: thuộc tính frontmatter, các liên kết kèm dòng nguồn, liên kết ngược, quan hệ do LLM trích xuất và các đoạn nguồn. Nhấp vào một tên trong thẻ để bay đến nút đó.
+
 ### 1. Đặt câu hỏi có căn cứ và mở nguồn trích dẫn
 
-![Câu trả lời của Kwipu cùng đồ thị và phần xem trước nguồn](img/second%20brain.jpeg)
+![Câu trả lời của Kwipu, đồ thị tập trung vào một ghi chú cùng thẻ ngữ cảnh](img/second%20brain.jpeg)
 
 ### 2. Tái dựng các thay đổi qua những cuộc họp và lần đánh giá
 
