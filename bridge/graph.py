@@ -179,6 +179,29 @@ def _frontmatter(props: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_STRUCTURAL_ORIGINS = {"wikilink", "frontmatter"}
+
+
+def _is_structural(relation_props: dict[str, Any]) -> bool:
+    """Relation derived from wikilinks or frontmatter by the core indexer."""
+    return relation_props.get("origin") in _STRUCTURAL_ORIGINS
+
+
+def _note_entities(relations: list[tuple[str, str, str, dict[str, Any]]]) -> set[str]:
+    """Entities standing for notes: structural subjects and wikilink targets.
+
+    Homonymous notes get path-qualified ids such as ``People/Alice``; they
+    must survive the noise filter that drops path-like LLM entities.
+    """
+    notes = set()
+    for source, target, _, props in relations:
+        if _is_structural(props):
+            notes.add(source)
+            if props.get("origin") == "wikilink":
+                notes.add(target)
+    return notes
+
+
 def _is_noisy_entity(node_id: str) -> bool:
     if "\\" in node_id or "/" in node_id:
         return True
@@ -262,6 +285,7 @@ def load_snapshot(
     for source, target, _, _ in relations:
         degree[source] = degree.get(source, 0) + 1
         degree[target] = degree.get(target, 0) + 1
+    note_entities = _note_entities(relations)
 
     nodes: list[GraphNode] = []
     kept_types: dict[str, str] = {}
@@ -282,7 +306,7 @@ def load_snapshot(
             file_name = None
 
         if label == "entity":
-            if drop_noisy and _is_noisy_entity(raw_id):
+            if drop_noisy and raw_id not in note_entities and _is_noisy_entity(raw_id):
                 skipped_noisy += 1
                 continue
             if degree.get(raw_id, 0) < min_degree:
@@ -359,11 +383,17 @@ def load_snapshot(
 def _candidate_source_paths(
     node_id: str, node: dict[str, Any], data: dict[str, Any]
 ) -> Iterator[tuple[Any, str | None]]:
+    raw_nodes: dict[Any, Any] = data["nodes"]
+    relations, _ = _valid_relations(data["relations"])
+    # A note entity opens its own file first. LLM entities carry the path of
+    # the chunk they were first extracted from, which may be another note.
+    for source, _, _, relation_props in relations:
+        if source == node_id and _is_structural(relation_props):
+            yield relation_props.get("file_path"), None
+
     props = _properties(node)
     yield props.get("file_path"), props.get("file_name") if isinstance(props.get("file_name"), str) else None
 
-    raw_nodes: dict[Any, Any] = data["nodes"]
-    relations, _ = _valid_relations(data["relations"])
     for source, target, _, relation_props in relations:
         if node_id not in {source, target}:
             continue
@@ -374,6 +404,10 @@ def _candidate_source_paths(
         chunk_props = _properties(chunk)
         file_name = chunk_props.get("file_name")
         yield chunk_props.get("file_path"), file_name if isinstance(file_name, str) else None
+
+    for _, target, _, relation_props in relations:
+        if target == node_id and _is_structural(relation_props):
+            yield relation_props.get("file_path"), None
 
     names = {node_id.casefold()}
     node_name = node.get("name")

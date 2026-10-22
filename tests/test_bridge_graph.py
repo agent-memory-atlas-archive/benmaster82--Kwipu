@@ -194,6 +194,42 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.stats.skipped_malformed_nodes, 3)
         self.assertEqual(snapshot.stats.skipped_malformed_relations, 2)
 
+    def test_path_qualified_note_entities_survive_noise_filter(self):
+        structural = {"origin": "frontmatter", "field": "role", "file_path": "kb/Team/Dana.md"}
+        data = {
+            "nodes": {
+                "Team/Dana": {"label": "entity", "name": "Team/Dana", "properties": {}},
+                "QA": {"label": "entity", "name": "QA", "properties": {}},
+                "src/main.py": {"label": "entity", "properties": {}},
+                "50000": {"label": "entity", "properties": {}},
+            },
+            "relations": {
+                "r1": {
+                    "source_id": "Team/Dana",
+                    "target_id": "QA",
+                    "label": "Has role",
+                    "properties": structural,
+                },
+                "r2": {
+                    "source_id": "Team/Dana",
+                    "target_id": "50000",
+                    "label": "Has budget",
+                    "properties": {**structural, "field": "budget"},
+                },
+                "r3": {
+                    "source_id": "QA",
+                    "target_id": "src/main.py",
+                    "label": "Uses",
+                    "properties": {},
+                },
+            },
+        }
+        with mock.patch.object(graph, "load_property_graph", return_value=data):
+            snapshot = graph.load_snapshot(drop_noisy=True)
+
+        self.assertEqual({node.id for node in snapshot.nodes}, {"Team/Dana", "QA"})
+        self.assertEqual(snapshot.stats.skipped_noisy, 2)
+
     def test_chunk_and_provenance_links_follow_include_chunks_filter(self):
         with mock.patch.object(graph, "load_property_graph", return_value=self._data()):
             snapshot = graph.load_snapshot(include_chunks=False)
@@ -250,6 +286,47 @@ class ExpandNodeTests(unittest.TestCase):
             self.assertEqual(result["file_path"], "Alice.md")
             self.assertEqual(result["file_name"], "Alice.md")
             self.assertEqual(result["markdown"], "# Alice\nLocal source.\n")
+
+    def test_structural_provenance_prefers_the_note_itself(self):
+        other = self.knowledge / "Meeting.md"
+        other.write_text("# Meeting\n", encoding="utf-8")
+        data = {
+            "nodes": {
+                "chunk-meeting": {
+                    "label": "text_chunk",
+                    "properties": {"file_name": "Meeting.md", "file_path": "kb/Meeting.md"},
+                },
+                "Alice": {
+                    "label": "entity",
+                    "name": "Alice",
+                    "properties": {"file_path": "kb/Meeting.md"},
+                },
+                "Lead": {"label": "entity", "name": "Lead", "properties": {}},
+                "Bob": {"label": "entity", "name": "Bob", "properties": {}},
+            },
+            "relations": {
+                "r1": {
+                    "source_id": "Bob",
+                    "target_id": "Alice",
+                    "properties": {"triplet_source_id": "chunk-meeting"},
+                },
+                "r2": {
+                    "source_id": "Alice",
+                    "target_id": "Lead",
+                    "properties": {
+                        "origin": "frontmatter",
+                        "field": "role",
+                        "file_path": str(self.source),
+                    },
+                },
+            },
+        }
+        with mock.patch.object(graph, "load_property_graph", return_value=data):
+            note = graph.expand_node("Alice")
+            value = graph.expand_node("Lead")
+
+        self.assertEqual(note["file_path"], "Alice.md")
+        self.assertEqual(value["file_path"], "Alice.md")
 
     def test_entity_falls_back_to_matching_chunk_file_name(self):
         data = {
