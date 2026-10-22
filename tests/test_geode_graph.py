@@ -98,7 +98,7 @@ class FrontmatterAndWikilinkTests(unittest.TestCase):
         triples = geode_graph.extract_wikilink_triples("notes/Alice.md", text)
 
         self.assertEqual(len(triples), 2)
-        self.assertEqual(triples[0], ("Alice", "Lavora presso", "Acme"))
+        self.assertEqual(triples[0][:3], ("Alice", "Lavora presso", "Acme"))
         self.assertEqual(triples[1][0::2], ("Alice", "Bob"))
 
 
@@ -113,17 +113,22 @@ class StructuralTripleInjectionTests(unittest.TestCase):
         rag = object.__new__(geode_graph.WritHerGraphRAG)
         rag.index = mock.Mock(property_graph_store=store)
 
+        provenance = {"origin": "wikilink", "file_path": "Alice.md", "line": 3}
         rag._inject_structural_triples(
             [
-                ("Alice", "Collaborates with", "Bob"),
-                ("Alice", "Has role", "Frontend Lead"),
+                geode_graph.StructuralTriple(
+                    "Alice", "Collaborates with", "Bob", provenance
+                ),
+                geode_graph.StructuralTriple(
+                    "Alice", "Has role", "Frontend Lead", {"origin": "frontmatter"}
+                ),
             ]
         )
 
-        triplets = {
-            (subj.id, rel.label, obj.id)
-            for subj, rel, obj in store.get_triplets(entity_names=["Alice"])
-        }
+        stored = store.get_triplets(entity_names=["Alice"])
+        triplets = {(subj.id, rel.label, obj.id) for subj, rel, obj in stored}
+        collaborates = next(r for _, r, _ in stored if r.label == "Collaborates with")
+        self.assertEqual(collaborates.properties, provenance)
         self.assertEqual(
             triplets,
             {
@@ -134,6 +139,160 @@ class StructuralTripleInjectionTests(unittest.TestCase):
         self.assertEqual(
             store.get(ids=["Bob"])[0].properties, {"origin": "llm"}
         )
+
+
+class WikilinkRelationTests(unittest.TestCase):
+    def relations(self, line):
+        triples = geode_graph.extract_wikilink_triples("Note.md", line)
+        return [(t.relation, t.object) for t in triples]
+
+    def test_each_link_uses_the_text_before_it(self):
+        self.assertEqual(
+            self.relations("Dana works for [[Acme]] and collaborates with [[Bob]]."),
+            [("Works at", "Acme"), ("Collaborates with", "Bob")],
+        )
+
+    def test_link_joined_by_conjunction_inherits_relation(self):
+        self.assertEqual(
+            self.relations("Collaborates with [[Bob]] and [[Charlie]]."),
+            [("Collaborates with", "Bob"), ("Collaborates with", "Charlie")],
+        )
+
+    def test_patterns_match_whole_words_in_the_line_language(self):
+        self.assertEqual(
+            self.relations("Discussed because of [[Bob]]"),
+            [("Is related to", "Bob")],
+        )
+        self.assertEqual(
+            self.relations("Alice is a partner of [[Acme]]"),
+            [("Is partner of", "Acme")],
+        )
+
+    def test_accented_text_matches_unaccented_patterns(self):
+        self.assertEqual(
+            self.relations("Le module est développé par [[Acme]]"),
+            [("Est developpe par", "Acme")],
+        )
+
+
+class StructuralProvenanceTests(unittest.TestCase):
+    def test_triples_record_file_field_line_and_content_hash(self):
+        text = "---\ntags: [x]\nrole: Lead\n---\n# Alice\n\nWorks with [[Bob]].\n"
+        document = geode_graph.Document(text=text, metadata={"file_path": "Alice.md"})
+
+        _, triples = geode_graph.enrich_documents([document], vault_root=".")
+
+        by_relation = {t.relation: t.properties for t in triples}
+        source_hash = geode_graph.hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.assertEqual(
+            by_relation["Works at"],
+            {
+                "origin": "wikilink",
+                "file_path": "Alice.md",
+                "line": 7,
+                "source_hash": source_hash,
+            },
+        )
+        self.assertEqual(
+            by_relation["Has role"],
+            {
+                "origin": "frontmatter",
+                "field": "role",
+                "file_path": "Alice.md",
+                "line": 3,
+                "source_hash": source_hash,
+            },
+        )
+
+
+class EntityIdentityTests(unittest.TestCase):
+    def enrich(self, notes):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            documents = []
+            for relative, text in notes.items():
+                path = vault / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+                documents.append(
+                    geode_graph.Document(text=text, metadata={"file_path": str(path)})
+                )
+            _, triples = geode_graph.enrich_documents(
+                documents, vault_root=str(vault)
+            )
+            resolver = geode_graph.NoteResolver.from_vault(str(vault))
+        return {t[:3] for t in triples}, resolver
+
+    def test_homonymous_notes_get_path_qualified_names(self):
+        triples, _ = self.enrich(
+            {
+                "Persone/Alice.md": "---\nrole: Lead\n---\n",
+                "Archivio/Alice.md": "---\nrole: Intern\n---\n",
+                "Persone/Bob.md": "Works with [[Alice]].\n",
+            }
+        )
+
+        self.assertEqual(
+            triples,
+            {
+                ("Persone/Alice", "Has role", "Lead"),
+                ("Archivio/Alice", "Has role", "Intern"),
+                ("Bob", "Works at", "Persone/Alice"),
+            },
+        )
+
+    def test_path_heading_and_display_links_resolve_to_one_note(self):
+        triples, _ = self.enrich(
+            {
+                "Persone/Alice.md": "# Alice\n## Ruolo\n",
+                "Bob.md": (
+                    "Works with [[Persone/Alice]].\n"
+                    "Collaborates with [[Alice#Ruolo]].\n"
+                    "Uses [[Alice|Ali]] and [[#Notes]].\n"
+                ),
+            }
+        )
+
+        self.assertEqual(triples, {("Bob", "Works at", "Alice")})
+
+    def test_frontmatter_alias_of_renamed_note_resolves_links_and_values(self):
+        triples, resolver = self.enrich(
+            {
+                "Charlie.md": "---\naliases: [Carlo]\n---\n",
+                "Dana.md": "---\nresponsible: Carlo\n---\nReports to [[Carlo]].\n",
+            }
+        )
+
+        self.assertIn(("Dana", "Has responsible", "Charlie"), triples)
+        self.assertIn("Charlie", {o for _, _, o in triples})
+        self.assertNotIn("Carlo", {o for _, _, o in triples})
+        self.assertEqual(resolver.aliases("Charlie"), ["Carlo"])
+
+    def test_incremental_insert_rebuilds_when_new_note_renames_entities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vault = Path(directory)
+            (vault / "Persone").mkdir()
+            (vault / "Persone" / "Alice.md").write_text("", encoding="utf-8")
+            (vault / "Archivio").mkdir()
+            new_note = vault / "Archivio" / "Alice.md"
+            new_note.write_text("", encoding="utf-8")
+            (vault / "Charlie.md").write_text(
+                "---\naliases: [Carlo]\n---\n", encoding="utf-8"
+            )
+            rag = object.__new__(geode_graph.WritHerGraphRAG)
+            rag.index = mock.Mock()
+            rag.index.property_graph_store.get.return_value = [mock.Mock()]
+
+            with mock.patch.object(geode_graph, "KNOWLEDGE_DIR", str(vault)):
+                resolver = geode_graph.NoteResolver.from_vault(str(vault))
+                self.assertTrue(rag._renames_existing_entities(resolver, new_note))
+                self.assertTrue(
+                    rag._renames_existing_entities(resolver, vault / "Charlie.md")
+                )
+                rag.index.property_graph_store.get.return_value = []
+                self.assertFalse(
+                    rag._renames_existing_entities(resolver, vault / "Charlie.md")
+                )
 
 
 class QuestionValidationTests(unittest.TestCase):

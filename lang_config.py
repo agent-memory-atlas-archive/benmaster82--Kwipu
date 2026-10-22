@@ -206,10 +206,10 @@ RELATION_PATTERNS = {
         (r"member\s+of", "Is member of"),
         (r"supervis(es|ed|ing)", "Supervises"),
         (r"access\s+to", "Has access to"),
-        (r"uses?", "Uses"),
+        (r"uses?\b", "Uses"),
         (r"based\s+on", "Is based on"),
         (r"trained\s+on", "Is trained on"),
-        (r"hosts?", "Hosts"),
+        (r"hosts?\b", "Hosts"),
         (r"part\s+of", "Is part of"),
         (r"launched", "Is launched by"),
         (r"tests?\s+(on|with)", "Tests with"),
@@ -421,16 +421,36 @@ def extract_date_tokens(text: str) -> list[str]:
 # ==========================================
 # MULTILINGUAL RELATION INFERENCE
 # ==========================================
-def infer_relation(line: str, subject: str, target: str) -> str:
-    """Infer relation from line context, trying all languages."""
-    line_lower = line.lower()
+# Patterns are anchored at a word start so stems never match inside other
+# words (e.g. "uses?" inside "because").
+_COMPILED_RELATION_PATTERNS = {
+    lang: [(re.compile(rf"\b(?:{pattern})"), relation) for pattern, relation in patterns]
+    for lang, patterns in RELATION_PATTERNS.items()
+}
 
-    # Try patterns from all languages
-    for lang, patterns in RELATION_PATTERNS.items():
-        for pattern, relation in patterns:
-            if re.search(pattern, line_lower):
+
+def match_relation(text: str, lang: str | None = None) -> str | None:
+    """Return the first relation pattern matching text, or None.
+
+    Patterns of ``lang`` are tried first, then the remaining languages.
+    """
+    normalized = _normalize_token(text)
+    langs = list(_COMPILED_RELATION_PATTERNS)
+    if lang in _COMPILED_RELATION_PATTERNS:
+        langs.remove(lang)
+        langs.insert(0, lang)
+    for candidate in langs:
+        for pattern, relation in _COMPILED_RELATION_PATTERNS[candidate]:
+            if pattern.search(normalized):
                 return relation
+    return None
 
-    # Detect line language for fallback
-    lang = detect_language(line)
+
+def fallback_relation(lang: str) -> str:
     return FALLBACK_RELATION.get(lang, "Is related to")
+
+
+def infer_relation(line: str, subject: str, target: str) -> str:
+    """Infer relation from line context, preferring the line's language."""
+    lang = detect_language(line)
+    return match_relation(line, lang) or fallback_relation(lang)

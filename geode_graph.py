@@ -23,6 +23,7 @@ import threading
 import asyncio
 from pathlib import Path
 from collections import defaultdict, Counter
+from typing import NamedTuple
 
 # Fix for Windows: avoid "Event loop is closed" with ProactorEventLoop
 if sys.platform == "win32":
@@ -104,7 +105,8 @@ from lang_config import (
     tokenize,
     detect_language,
     extract_date_tokens,
-    infer_relation,
+    fallback_relation,
+    match_relation,
     ALL_TEMPORAL_KEYWORDS,
     FALLBACK_RELATION,
 )
@@ -525,44 +527,253 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, body
 
 
-def extract_wikilink_triples(file_path: str, text: str) -> list[tuple[str, str, str]]:
-    """Extract structured triples from Obsidian [[wikilinks]] with multilingual inference."""
-    filename = Path(file_path).stem
+class StructuralTriple(NamedTuple):
+    """A triple derived from note structure, with its provenance properties."""
+
+    subject: str
+    relation: str
+    object: str
+    properties: dict
+
+
+_FRONTMATTER_KEY_RE = re.compile(r"^([^\s:#'\"-][^:]*?)\s*:")
+
+
+def _note_key(file_path: str, vault_root: str) -> str:
+    """Vault-relative POSIX path without extension (the stem outside the vault)."""
+    path = Path(file_path)
+    try:
+        relative = path.resolve().relative_to(Path(vault_root).resolve())
+    except ValueError:
+        return path.stem
+    return relative.with_suffix("").as_posix()
+
+
+def _note_dir(key: str) -> str:
+    return key.rsplit("/", 1)[0] if "/" in key else ""
+
+
+def _frontmatter_aliases(metadata: dict) -> list[str]:
+    aliases = []
+    for key in ("aliases", "alias"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            value = [value]
+        if isinstance(value, list):
+            aliases.extend(str(v).strip() for v in value if str(v).strip())
+    return aliases
+
+
+class NoteResolver:
+    """Map Obsidian link targets to canonical note entity names.
+
+    A note is named by its file stem when the stem is unique in the vault and
+    by its vault-relative path otherwise, so homonymous notes stay distinct.
+    Targets lose their #heading/^block part; path links and frontmatter
+    aliases resolve to the note they point to.
+    """
+
+    def __init__(self, notes: dict[str, list[str]]):
+        self._aliases = {key: list(aliases) for key, aliases in notes.items()}
+        self._by_stem = defaultdict(list)
+        self._by_alias = {}
+        for key, aliases in notes.items():
+            self._by_stem[key.rsplit("/", 1)[-1].casefold()].append(key)
+            for alias in aliases:
+                self._by_alias.setdefault(alias.casefold(), key)
+
+    @classmethod
+    def from_documents(cls, documents: list[Document], vault_root: str):
+        notes: dict[str, list[str]] = {}
+        for doc in documents:
+            file_path = doc.metadata.get("file_path", doc.id_)
+            metadata, _ = parse_frontmatter(doc.text)
+            notes.setdefault(_note_key(file_path, vault_root), []).extend(
+                _frontmatter_aliases(metadata)
+            )
+        return cls(notes)
+
+    @classmethod
+    def from_vault(cls, vault_root: str):
+        """Index every supported file in the vault without loading documents."""
+        notes: dict[str, list[str]] = {}
+        for dirpath, dirnames, filenames in os.walk(vault_root):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for name in filenames:
+                path = Path(dirpath) / name
+                suffix = path.suffix.lower()
+                if name.startswith(".") or suffix not in WATCHER_VALID_EXTENSIONS:
+                    continue
+                aliases = []
+                if suffix == ".md":
+                    try:
+                        text = path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        text = ""
+                    aliases = _frontmatter_aliases(parse_frontmatter(text)[0])
+                notes[_note_key(str(path), vault_root)] = aliases
+        return cls(notes)
+
+    def canonical(self, key: str) -> str:
+        return key if self.is_ambiguous(key) else key.rsplit("/", 1)[-1]
+
+    def is_ambiguous(self, key: str) -> bool:
+        stem = key.rsplit("/", 1)[-1].casefold()
+        return len(self._by_stem.get(stem, [])) > 1
+
+    def aliases(self, key: str) -> list[str]:
+        return self._aliases.get(key, [])
+
+    @staticmethod
+    def _clean_target(target: str) -> str:
+        target = target.split("#", 1)[0].strip().replace("\\", "/")
+        suffix = Path(target).suffix.lower()
+        if suffix in WATCHER_VALID_EXTENSIONS:
+            target = target[: -len(suffix)]
+        return target
+
+    def _lookup(self, target: str, source_key: str | None) -> str | None:
+        folded = target.casefold()
+        if "/" in folded:
+            candidates = [
+                key
+                for key in self._aliases
+                if key.casefold() == folded or key.casefold().endswith("/" + folded)
+            ]
+        else:
+            candidates = list(self._by_stem.get(folded, []))
+        if not candidates and folded in self._by_alias:
+            candidates = [self._by_alias[folded]]
+        if not candidates:
+            return None
+        if source_key is not None:
+            # Like Obsidian, prefer a homonymous note next to the linking note.
+            same_dir = [k for k in candidates if _note_dir(k) == _note_dir(source_key)]
+            candidates = same_dir or candidates
+        return min(candidates, key=lambda k: (k.count("/"), k.casefold()))
+
+    def resolve(self, target: str, source_key: str | None = None) -> str | None:
+        """Canonical entity name for a link target; None for links to a heading."""
+        target = self._clean_target(target)
+        if not target:
+            return None
+        key = self._lookup(target, source_key)
+        if key is None:
+            return target.rsplit("/", 1)[-1]
+        return self.canonical(key)
+
+    def resolve_value(self, value: str, source_key: str | None = None) -> str:
+        """Resolve a frontmatter value only when it names an existing note."""
+        value = value.strip()
+        link = _WIKILINK_RE.fullmatch(value)
+        if link:
+            return self.resolve(link.group(1), source_key) or value
+        key = self._lookup(self._clean_target(value), source_key)
+        return self.canonical(key) if key else value
+
+
+def _frontmatter_key_lines(header: str) -> dict[str, int]:
+    """Line number (1-based, in the whole file) of each top-level frontmatter key."""
+    lines = {}
+    for number, line in enumerate(header.splitlines(), start=1):
+        match = _FRONTMATTER_KEY_RE.match(line)
+        if match:
+            lines.setdefault(match.group(1), number)
+    return lines
+
+
+def extract_wikilink_triples(
+    file_path: str,
+    text: str,
+    *,
+    resolver: NoteResolver | None = None,
+    vault_root: str | None = None,
+    line_offset: int = 0,
+    provenance: dict | None = None,
+) -> list[StructuralTriple]:
+    """Extract structured triples from Obsidian [[wikilinks]] with multilingual inference.
+
+    Each link's relation comes from the text between the previous link on the
+    same line (or the line start) and the link itself. A link separated from
+    the previous one only by punctuation or stopwords ("[[A]] and [[B]]")
+    inherits its relation.
+    """
+    vault_root = KNOWLEDGE_DIR if vault_root is None else vault_root
+    source_key = _note_key(file_path, vault_root)
+    if resolver is None:
+        resolver = NoteResolver({source_key: []})
+    subject = resolver.canonical(source_key)
+    base_properties = {"origin": "wikilink", "file_path": file_path, **(provenance or {})}
     triples = []
     seen = set()
+    line_start = -1
+    context_start = 0
+    previous_relation = None
 
     for match in _WIKILINK_RE.finditer(text):
-        target = match.group(1).strip()
-        if not target:
-            continue
-
-        pair_key = (filename.lower(), target.lower())
-        if pair_key in seen:
-            continue
-        seen.add(pair_key)
-
-        line_start = text.rfind("\n", 0, match.start()) + 1
+        current_line_start = text.rfind("\n", 0, match.start()) + 1
+        if current_line_start != line_start:
+            line_start = context_start = current_line_start
+            previous_relation = None
         line_end = text.find("\n", match.end())
-        if line_end == -1:
-            line_end = len(text)
-        line = text[line_start:line_end].strip()
+        line = text[line_start : len(text) if line_end == -1 else line_end]
+        context = text[context_start : match.start()]
+        context_start = match.end()
 
-        # Use multilingual inference
-        relation = infer_relation(line, filename, target)
-        triples.append((filename, relation, target))
+        lang = detect_language(line)
+        relation = match_relation(context, lang)
+        if relation is None:
+            if previous_relation and not tokenize(context):
+                relation = previous_relation
+            else:
+                relation = fallback_relation(lang)
+        previous_relation = relation
+
+        target = resolver.resolve(match.group(1), source_key)
+        if not target or target.casefold() == subject.casefold():
+            continue
+        if target.casefold() in seen:
+            continue
+        seen.add(target.casefold())
+
+        line_number = line_offset + text.count("\n", 0, match.start()) + 1
+        triples.append(
+            StructuralTriple(
+                subject, relation, target, {**base_properties, "line": line_number}
+            )
+        )
 
     return triples
 
 
 def extract_frontmatter_triples(
-    file_path: str, metadata: dict
-) -> list[tuple[str, str, str]]:
+    file_path: str,
+    metadata: dict,
+    *,
+    resolver: NoteResolver | None = None,
+    vault_root: str | None = None,
+    key_lines: dict[str, int] | None = None,
+    provenance: dict | None = None,
+) -> list[StructuralTriple]:
     """Generate structured triples from YAML frontmatter.
 
     Frontmatter keys are mapped to relations across supported languages.
+    Values naming an existing note resolve to that note's entity.
     """
-    filename = Path(file_path).stem
+    vault_root = KNOWLEDGE_DIR if vault_root is None else vault_root
+    source_key = _note_key(file_path, vault_root)
+    if resolver is None:
+        resolver = NoteResolver({source_key: []})
+    filename = resolver.canonical(source_key)
+    key_lines = key_lines or {}
     triples = []
+
+    def add(field: str, relation: str, value: str):
+        properties = {"origin": "frontmatter", "field": field, "file_path": file_path}
+        if field in key_lines:
+            properties["line"] = key_lines[field]
+        properties.update(provenance or {})
+        triples.append(StructuralTriple(filename, relation, value, properties))
 
     # Frontmatter key -> relation mapping (multilingual)
     key_relations = {
@@ -606,14 +817,14 @@ def extract_frontmatter_triples(
     for key, relation in key_relations.items():
         value = metadata.get(key)
         if value and isinstance(value, str):
-            triples.append((filename, relation, value))
+            add(key, relation, resolver.resolve_value(value, source_key))
 
     # Tags (universal key)
     tags = metadata.get("tags", [])
     if isinstance(tags, list):
         for tag in tags:
             if isinstance(tag, str):
-                triples.append((filename, "Has tag", tag))
+                add("tags", "Has tag", tag)
 
     # Participants (multilingual keys)
     for key in ("partecipanti", "participants", "teilnehmer", "participantes"):
@@ -621,26 +832,26 @@ def extract_frontmatter_triples(
         if isinstance(partecipanti, list):
             for p in partecipanti:
                 if isinstance(p, str):
-                    triples.append((filename, "Has participant", p))
+                    add(key, "Has participant", resolver.resolve_value(p, source_key))
 
     # Date (multilingual keys)
     for key in ("data", "date", "datum", "fecha"):
         data = metadata.get(key)
         if data:
-            triples.append((filename, "Has date", str(data)))
+            add(key, "Has date", str(data))
             break
 
     # Budget (universal)
     budget = metadata.get("budget")
     if budget:
-        triples.append((filename, "Has budget", f"{budget}"))
+        add("budget", "Has budget", f"{budget}")
 
     # Duration (multilingual keys)
     for key in ("durata_mesi", "duration_months", "duree_mois", "dauer_monate",
                 "duracion_meses", "duracao_meses"):
         durata = metadata.get(key)
         if durata:
-            triples.append((filename, "Has duration", f"{durata} months"))
+            add(key, "Has duration", f"{durata} months")
             break
 
     return triples
@@ -648,8 +859,18 @@ def extract_frontmatter_triples(
 
 def enrich_documents(
     documents: list[Document],
-) -> tuple[list[Document], list[tuple[str, str, str]]]:
-    """Pre-process documents: extract frontmatter, wikilinks and generate structured triples."""
+    *,
+    resolver: NoteResolver | None = None,
+    vault_root: str | None = None,
+) -> tuple[list[Document], list[StructuralTriple]]:
+    """Pre-process documents: extract frontmatter, wikilinks and generate structured triples.
+
+    Without an explicit resolver, link targets are resolved against the given
+    documents only; pass ``NoteResolver.from_vault`` for partial batches.
+    """
+    vault_root = KNOWLEDGE_DIR if vault_root is None else vault_root
+    if resolver is None:
+        resolver = NoteResolver.from_documents(documents, vault_root)
     all_triples = []
     enriched_docs = []
 
@@ -658,6 +879,8 @@ def enrich_documents(
         file_path = doc.metadata.get("file_path", doc.id_)
 
         metadata, body = parse_frontmatter(text)
+        header = text[: len(text) - len(body)]
+        provenance = {"source_hash": hashlib.sha256(text.encode("utf-8")).hexdigest()}
 
         for key, value in metadata.items():
             if isinstance(value, (str, int, float)):
@@ -665,10 +888,24 @@ def enrich_documents(
             elif isinstance(value, list):
                 doc.metadata[f"fm_{key}"] = ", ".join(str(v) for v in value)
 
-        wikilink_triples = extract_wikilink_triples(file_path, body)
+        wikilink_triples = extract_wikilink_triples(
+            file_path,
+            body,
+            resolver=resolver,
+            vault_root=vault_root,
+            line_offset=header.count("\n"),
+            provenance=provenance,
+        )
         all_triples.extend(wikilink_triples)
 
-        fm_triples = extract_frontmatter_triples(file_path, metadata)
+        fm_triples = extract_frontmatter_triples(
+            file_path,
+            metadata,
+            resolver=resolver,
+            vault_root=vault_root,
+            key_lines=_frontmatter_key_lines(header),
+            provenance=provenance,
+        )
         all_triples.extend(fm_triples)
 
         enriched_docs.append(doc)
@@ -678,16 +915,16 @@ def enrich_documents(
 
 
 def _deduplicate_triples(
-    triples: list[tuple[str, str, str]],
-) -> list[tuple[str, str, str]]:
-    """Remove duplicate triples (case-insensitive)."""
+    triples: list[StructuralTriple],
+) -> list[StructuralTriple]:
+    """Remove duplicate triples (case-insensitive), keeping the first provenance."""
     seen = set()
     unique = []
-    for s, r, o in triples:
+    for s, r, o, properties in triples:
         key = (s.lower().strip(), r.lower().strip(), o.lower().strip())
         if key not in seen:
             seen.add(key)
-            unique.append((s.strip(), r.strip(), o.strip()))
+            unique.append(StructuralTriple(s.strip(), r.strip(), o.strip(), properties))
     return unique
 
 
@@ -1116,12 +1353,24 @@ class WritHerGraphRAG:
                         self._retrievers_dirty = True
                         return
 
+                    resolver = NoteResolver.from_vault(KNOWLEDGE_DIR)
+                    if self._renames_existing_entities(resolver, file_path):
+                        safe_print(
+                            f"{os.path.basename(file_path)} changes how existing "
+                            "notes are named. Full rebuild..."
+                        )
+                        self._build_index_unlocked()
+                        self._retrievers_dirty = True
+                        return
+
                     reader = SimpleDirectoryReader(
                         input_files=[file_path], filename_as_id=True
                     )
                     docs = reader.load_data()
                     if docs:
-                        enriched_docs, structural_triples = enrich_documents(docs)
+                        enriched_docs, structural_triples = enrich_documents(
+                            docs, resolver=resolver
+                        )
                         for doc in enriched_docs:
                             safe_print(
                                 f"Incremental insert: {os.path.basename(file_path)}..."
@@ -1161,27 +1410,46 @@ class WritHerGraphRAG:
         safe_print(f"Modified file detected: {os.path.basename(file_path)}.")
         self.build_index()
 
+    def _renames_existing_entities(self, resolver: NoteResolver, file_path) -> bool:
+        """True when a new note invalidates entity names already in the graph.
+
+        A homonym turns the existing note's stem into a path-qualified name, and
+        an alias already used as an entity should now point to this note.
+        """
+        key = _note_key(file_path, KNOWLEDGE_DIR)
+        if resolver.is_ambiguous(key):
+            return True
+        aliases = resolver.aliases(key)
+        return bool(aliases) and bool(
+            self.index.property_graph_store.get(ids=aliases)
+        )
+
     def _inject_structural_triples(
-        self, triples: list[tuple[str, str, str]], *, index=None
+        self, triples: list[StructuralTriple], *, index=None
     ):
         """Inject pre-extracted triples into the selected property graph."""
         target_index = self.index if index is None else index
         if not target_index or not triples:
             return
         graph_store = target_index.property_graph_store
-        names = {name for subj, _, obj in triples for name in (subj, obj)}
+        names = {name for subj, _, obj, _ in triples for name in (subj, obj)}
         # upsert_nodes replaces nodes by id: keep LLM-extracted entities intact.
         existing_ids = {node.id for node in graph_store.get(ids=list(names))}
         new_nodes = {}
         relations = []
-        for subj, rel, obj in triples:
+        for subj, rel, obj, properties in triples:
             subj_node = EntityNode(name=subj)
             obj_node = EntityNode(name=obj)
             for node in (subj_node, obj_node):
                 if node.id not in existing_ids:
                     new_nodes.setdefault(node.id, node)
             relations.append(
-                Relation(label=rel, source_id=subj_node.id, target_id=obj_node.id)
+                Relation(
+                    label=rel,
+                    source_id=subj_node.id,
+                    target_id=obj_node.id,
+                    properties=dict(properties),
+                )
             )
         graph_store.upsert_nodes(list(new_nodes.values()))
         graph_store.upsert_relations(relations)
